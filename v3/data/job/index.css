@@ -1,8 +1,13 @@
 :root {
+  --fg-blue: #1a0dab;
+  --fg-brown: #a52a2a;
+  --fg-green: #00915c;
   --bg-light-dark: rgba(0, 0, 0, 0.05);
   --bg-dark: #4d5155;
   --bg-light: #fff;
   --bg-progress: #0074cc;
+  --bg-progress-body: #355975;
+  --disabled: 0.5;
 }
 
 body {
@@ -11,7 +16,7 @@ body {
   background-color: var(--bg-light);
   color: #4d5156;
   display: grid;
-  grid-template-rows: 1fr min-content min-content;
+  grid-template-rows: min-content 1fr min-content min-content;
   margin: 0;
   height: 100vh;
   accent-color: var(--bg-dark);
@@ -65,7 +70,7 @@ footer > div {
   padding: 10px;
 }
 footer > div[id$=-selector]:active {
-  opacity: 0.5;
+  opacity: var(--disabled);
   transition: 0s;
 }
 
@@ -90,8 +95,9 @@ textarea,
 input {
   border: solid 1px rgba(0, 0, 0, 0.25);
 }
+input[type=submit]:disabled,
 input[type=button]:disabled {
-  opacity: 0.2;
+  opacity: var(--disabled);
 }
 textarea {
   width: 100%;
@@ -116,9 +122,13 @@ a:visited {
 .hidden {
   display: none !important;
 }
+.disabled * {
+  opacity: 0.5;
+  pointer-events: none;
+}
 
 #intro {
-  height: 100vh;
+  height: 100%;
   display: flex;
   justify-content: center;
   flex-direction: column;
@@ -127,6 +137,7 @@ a:visited {
   position: absolute;
   inset: 0;
   padding: 2rem;
+  box-sizing: border-box;
 }
 #intro ul {
   margin: 0;
@@ -143,7 +154,7 @@ body:not([data-mode=empty]) #intro {
   margin: 0;
   display: block;
   overflow: auto;
-  white-space: pre;
+  white-space: pre-line;
   max-height: 50vh;
 }
 #prompt > form {
@@ -169,6 +180,9 @@ body:not([data-mode=empty]) #intro {
 #prompt [name=value]:not([required]) {
   display: none;
 }
+#prompt [value=extra]:empty {
+  display: none;
+}
 
 .entry {
   display: contents;
@@ -187,8 +201,8 @@ body:not([data-mode=empty]) #intro {
 }
 #hrefs {
   display: grid;
-  grid-template-columns: min-content minmax(auto, 120px) repeat(2, min-content) 1fr repeat(3, min-content);
-  grid-gap: 10px 0;
+  grid-template-columns: min-content min-content min-content repeat(2, min-content) 1fr repeat(3, min-content);
+  grid-gap: 2px 10px;
   align-items: center;
   overflow: hidden;
 }
@@ -198,27 +212,43 @@ body:not([data-mode=empty]) #intro {
   align-items: center;
   text-overflow: ellipsis;
 }
-#hrefs span {
-  padding: 8px;
-}
 
 #hrefs .entry:nth-child(2n) [data-id="href"] {
   background-color: var(--bg-light-dark);
 }
-
-#hrefs input[type=button] {
-  margin-right: 2px;
+#hrefs span[data-id=extracted-name] {
+  font-style: italic;
+}
+#hrefs span[data-id=extracted-name],
+#hrefs span[data-id=name] {
+  max-width: 20ch;
+}
+#hrefs span[data-id=size] {
+  color: var(--fg-blue);
+  justify-self: center;
+}
+#hrefs span[data-id=href] {
+  padding: 10px;
+  color: var(--fg-brown);
+}
+#hrefs span[data-id=ext] {
+  color: var(--fg-green);
+  justify-self: center;
+}
+#hrefs input[type=button]:not(:last-child) {
+  margin-right: -8px;
 }
 
 #progress {
   z-index: 10;
-  width: 100%;
   color: var(--bg-progress);
   height: 5px;
+  border: none;
+  width: 100%;
 }
 #progress,
 #progress::-webkit-progress-bar {
-  background-color: transparent;
+  background-color: var(--bg-progress-body);
 }
 #progress::-webkit-progress-value {
   background: var(--bg-progress);
@@ -227,6 +257,9 @@ body:not([data-mode=empty]) #intro {
   background: var(--bg-progress);
 }
 
+body[data-mode=download] {
+  grid-template-rows: min-content min-content 1fr min-content min-content;
+}
 body:not([data-mode=download]) #progress {
   display: none;
 }
@@ -300,4 +333,27 @@ body[data-mode=empty] #tools {
 #options a {
   text-decoration: none;
   color: var(--bg-progress);
+}
+#power-container {
+  display: contents;
+}
+#forbidden-container {
+  background-color: #fff6d6;
+  color: #1b2d5b;
+  text-align: center;
+  height: 0;
+  visibility: collapse;
+}
+body.forbidden #forbidden-container {
+  height: unset;
+  visibility: unset;
+  padding: 10px;
+}
+
+body[data-mode="prepare"] #download-all,
+body[data-mode="download"] #download-all,
+body[data-mode="prepare"] #hrefs input[type="submit"],
+body[data-mode="download"] #hrefs input[type="submit"] {
+  opacity: var(--disabled);
+  pointer-events: none;
 }

@@ -14,7 +14,7 @@
     along with this program.  If not, see {https://www.mozilla.org/en-US/MPL/}.
 
     GitHub: https://github.com/chandler-stimson/live-stream-downloader/
-    Homepage: https://add0n.com/hls-downloader.html
+    Homepage: https://webextension.org/listing/hls-downloader.html
 */
 
 /* global MyGet */
@@ -34,6 +34,7 @@ const MIME_TYPES = {
   'application/postscript': 'ps',
   'application/vnd.ms-excel': 'xls',
   'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.apple.mpegurl': 'm3u8',
   'application/x-7z-compressed': '7z',
   'application/x-rar-compressed': 'rar',
   'application/x-shockwave-flash': 'swf',
@@ -54,31 +55,49 @@ const MIME_TYPES = {
 };
 
 class SGet extends MyGet {
-  constructor(...args) {
-    super(...args);
-    this.meta = {}; // name, ext, mime
-  }
   /* guess filename and extension */
   static guess(resp, meta = {}) {
     const href = resp.url.split('#')[0].split('?')[0];
-    if (href.startsWith('data:')) {
-      const mime = href.split('data:')[1].split(';')[0];
-      meta.ext = (MIME_TYPES[mime] || mime.split('/')[1] || '').split(';')[0];
-      meta.name = 'unknown';
-      meta.mime = mime;
-    }
-    else {
-      const fe = (href.substring(href.lastIndexOf('/') + 1) || 'unknown').slice(-100);
 
-      // valid file extension "*.webvtt"
-      const e = /(.+)\.([^.]{1,6})*$/.exec(fe);
-
-      meta.name = e ? e[1] : fe;
-      meta.mime = resp.headers.get('Content-Type') || '';
-      meta.ext = e ? e[2] : (MIME_TYPES[meta.mime] || meta.mime.split('/')[1] || '').split(';')[0];
+    const disposition = resp.headers.get('Content-Disposition');
+    let name = '';
+    if (disposition) {
+      const tmp = /filename\*=UTF-8''([^;]*)/.exec(disposition);
+      if (tmp && tmp.length) {
+        name = tmp[1].replace(/["']$/, '').replace(/^["']/, '');
+        name = decodeURIComponent(name);
+      }
     }
+    if (!name && disposition) {
+      const tmp = /filename=([^;]*)/.exec(disposition);
+      if (tmp && tmp.length) {
+        name = tmp[1].replace(/["']$/, '').replace(/^["']/, '');
+      }
+    }
+    if (!name) {
+      if (href.startsWith('data:')) {
+        const mime = href.split('data:')[1].split(';')[0];
+        meta.ext = (MIME_TYPES[mime] || mime.split('/')[1] || '').split(';')[0];
+        name = '';
+        meta.mime = mime;
+      }
+      else {
+        const fe = (href.substring(href.lastIndexOf('/') + 1) || 'unknown').slice(-100);
+        name = fe;
+      }
+    }
+    name = name || 'unknown';
+    // valid file extension "*.webvtt"
+    const e = /(.+)\.([^.]{1,6})*$/.exec(name);
+
+    name = e ? e[1] : name;
+    meta.mime = resp.headers.get('Content-Type') || '';
+    meta.ext = e ? e[2] : (MIME_TYPES[meta.mime] || meta.mime.split('/')[1] || '').split(';')[0];
+    meta.ext = meta.ext.slice(0, 15); // cannot be longer than 16 characters.
+    //
+    meta.name = decodeURIComponent(name) || meta.name;
   }
-  static size(bytes, si = false, dp = 1) {
+  static size(bytes, si = true, dp = 1) {
     bytes = Number(bytes);
     const thresh = si ? 1000 : 1024;
 
@@ -87,7 +106,7 @@ class SGet extends MyGet {
     }
 
     const units = si ?
-      ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'] :
+      ['KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'] :
       ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'];
     let u = -1;
     const r = 10 ** dp;

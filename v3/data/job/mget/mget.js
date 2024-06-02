@@ -14,11 +14,11 @@
     along with this program.  If not, see {https://www.mozilla.org/en-US/MPL/}.
 
     GitHub: https://github.com/chandler-stimson/live-stream-downloader/
-    Homepage: https://add0n.com/hls-downloader.html
+    Homepage: https://webextension.org/listing/hls-downloader.html
 */
 
 /* transfer the stream only when conditions met */
-class PolicyStream extends window.TransformStream {
+class PolicyStream extends TransformStream {
   constructor(size) {
     let fetched = 0;
     super({
@@ -38,11 +38,13 @@ class PolicyStream extends window.TransformStream {
 }
 
 /* use this to get fetch stats */
-class StatsStream extends window.TransformStream {
+class StatsStream extends TransformStream {
   constructor(c = () => {}) {
+    let offset = 0;
     super({
       transform(chunk, controller) {
-        c(chunk.byteLength);
+        c(chunk, offset);
+        offset += chunk.byteLength;
         return controller.enqueue(chunk);
       }
     });
@@ -80,6 +82,9 @@ class MGet {
     this.actives = 0;
     this.sizes = new Map(); // track segment offsets
     this.cache = {}; // store chunks of each segment in an array
+    this.meta = { // name, ext, mime
+      'written-size': 0
+    };
   }
   /* get called before a segment is started */
   prepare(segment, position) {
@@ -94,7 +99,9 @@ class MGet {
     return Promise.resolve();
   }
   /* get called when a new chunk is written */
-  monitor(segment, position, size) {
+  monitor(segment, position, chunk, offset) {
+    // console.info(segment.range.start + offset);
+    this.meta['written-size'] += chunk.byteLength;
   }
   /* get called when all segments are fetched */
   fetch(segments, params = {}) {
@@ -114,6 +121,7 @@ class MGet {
           if (segment) {
             try {
               const p = position - 1;
+
               await this.prepare(segment, p);
               await this.pipe(segment, params, p, () => {
                 // start a new segment if we have a free thread and there are leftover segments
@@ -130,6 +138,7 @@ class MGet {
           }
           else {
             if (this.actives === 0) {
+              this.meta.done = true;
               resolve();
             }
           }
@@ -139,8 +148,8 @@ class MGet {
       start();
     }).catch(e => {
       console.warn(e);
-      this.controller.abort();
-      throw Error(e);
+      this.controller.abort(e?.message || 'Unknown Error');
+      throw e;
     });
   }
   /* returns total number of permitted new network connections */
@@ -168,8 +177,9 @@ class MGet {
     return stream;
   }
   /* returns the native fetch */
-  native(request, params, save = false) {
-    return fetch(request, params);
+  async native(request, params, extra = {}) { // extra.save, extra.segment
+    const r = await fetch(request, params);
+    return r;
   }
   /*
     returns a valid link with arguments from a segment
@@ -205,21 +215,30 @@ class MGet {
     if (segment.range) {
       request.headers.append('Range', `bytes=${segment.range.start}-${segment.range.end}`);
     }
+    else {
+      // some servers perform better with ranged requests (some return less bytes, so we cannot use this)
+      // request.headers.append('Range', `bytes=0-`);
+    }
 
     this.actives += 1;
+    const extra = {
+      save: segment.cache,
+      segment
+    };
     return this.native(request, {
       ...params,
       signal: this.controller.signal,
       credentials: 'include'
-    }, segment.cache).then(r => {
+    }, extra).then(r => {
       const s = Number(r.headers.get('Content-Length'));
       const size = isNaN(s) ? 0 : Number(s);
 
       if (r.ok && this.sizes.has(position) === false) {
-        this.sizes.set(position, size);
+        if (size) { // only save size if there is a header for it
+          this.sizes.set(position, size);
+        }
         this.headers(segment, position, request, r);
       }
-
       const writable = this.writer(segment, position);
 
       const type = r.headers.get('Accept-Ranges');
@@ -229,9 +248,12 @@ class MGet {
         throw Error('NO_RANGE_SUPPORT_' + r.status);
       }
       else if (r.ok) {
-        // server supports range
+        // server supports range; report it to the native fetch with "extra.rangable" to prevent fixing broken pipes
+        const rangable = extra.rangable = size && type === 'bytes' && computable !== 'false';
 
-        if (size && type === 'bytes' && computable !== 'false' && size > this.options['thread-size']) {
+        if (rangable && size > this.options['thread-size']) {
+          segment.extraThreads = segment.extraThreads || new Set();
+
           return new Promise((resolve, reject) => {
             let start = segment.range?.start || 0;
             const end = segment.range?.end || size - 1;
@@ -248,55 +270,77 @@ class MGet {
               }
             }
 
-            // start the first part
-            let actives = 1;
+            // start the first part -> .pipeThrough(timeout)
             const policy = new PolicyStream(this.options['thread-size']);
-            const monitor = new StatsStream(size => {
-              this.monitor(segment, position, size);
+            segment.range = { // this is useful for error recovery
+              start: 0,
+              end: this.options['thread-size'],
+              complex: true
+            };
+            const monitor = new StatsStream((chunk, offset) => {
+              this.monitor(segment, position, chunk, offset);
             });
-            r.body.pipeThrough(policy).pipeThrough(monitor).pipeTo(writable).then(() => {
-              actives -= 1;
-              this.actives -= 1;
-              more();
-            }).catch(reject);
+
+            const oResponse = r.body.pipeThrough(policy).pipeThrough(monitor).pipeTo(writable)
+              .then(() => {
+                this.actives -= 1;
+                more();
+              }, e => {
+                reject(e);
+                more();
+              });
             // start other parts
             const more = () => {
               const ns = this.number();
               for (let n = 0; n < ns; n += 1) {
                 const start = ranges.shift();
                 if (start) {
-                  actives += 1;
-                  this.pipe({ // do not pass the "settled" method to the subsequent pipes
+                  const exResponse = this.pipe({ // do not pass the "settled" method to the subsequent pipes
                     ...segment,
                     range: {
                       start,
                       end: Math.min(start + this.options['thread-size'] - 1, end)
                     }
                   }, params, position).then(() => {
-                    actives -= 1;
+                    segment.extraThreads.delete(exResponse);
                     more();
-                  }).catch(reject);
+                  }).catch(e => {
+                    segment.extraThreads.delete(exResponse);
+                    reject(e);
+                  });
+                  segment.extraThreads.add(exResponse);
                 }
                 else {
                   break;
                 }
               }
-              if (actives === 0 && ranges.length === 0) {
-                resolve();
+              if (ranges.length === 0 && segment.extraThreads.size === 0) {
+                oResponse.finally(() => resolve());
               }
               settled();
               settled = () => {};
             };
-
             more();
           });
         }
         else {
           settled();
-          const monitor = new StatsStream(size => {
-            this.monitor(segment, position, size);
+          // if server does not return the segment size
+          let s = 0;
+          const monitor = new StatsStream((chunk, offset) => {
+            s += chunk.byteLength;
+
+            this.monitor(segment, position, chunk, offset);
           });
           return r.body.pipeThrough(monitor).pipeTo(writable).then(() => {
+            if (this.sizes.has(position) === false) { // save the extracted size for later use
+              console.info('SET_SIZE', position, s);
+              this.sizes.set(position, s);
+            }
+            else if (s !== size) {
+              console.info('INVALID_SIZE', s, size, '[Broken Download]');
+              throw Error('INVALID_SIZE');
+            }
             this.actives -= 1;
           });
         }
@@ -312,9 +356,11 @@ class MGet {
 }
 MGet.OPTIONS = {
   'thread-size': 3 * 1024 * 1024, // bytes; size of each segment (do not increase unless check with a large file)
+  // thread-timeout: ms for inactivity period before breaking. Do not use small value since it is also used for
+  // downloading from server that does not support ranging
+  'thread-timeout': 10000,
   'threads': 2, // number; max number of simultaneous threads
-  'next-segment-wait': 2000, // ms; time to wait after a segment is started, before considering the next segment,
-  'error-recovery': true // do not download already downloaded segments
+  'next-segment-wait': 2000 // ms; time to wait after a segment is started, before considering the next segment,
 };
 
 self.MyGet = MGet;
