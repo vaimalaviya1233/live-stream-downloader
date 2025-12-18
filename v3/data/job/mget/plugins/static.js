@@ -35,6 +35,8 @@ const MIME_TYPES = {
   'application/vnd.ms-excel': 'xls',
   'application/vnd.ms-powerpoint': 'ppt',
   'application/vnd.apple.mpegurl': 'm3u8',
+  'application/dash+xml': 'mpd',
+  'application/x-mpegURL': 'm3u8',
   'application/x-7z-compressed': '7z',
   'application/x-rar-compressed': 'rar',
   'application/x-shockwave-flash': 'swf',
@@ -44,6 +46,7 @@ const MIME_TYPES = {
   'application/binary': 'exe',
   'audio/mpeg': 'mp3',
   'audio/mpegurl': 'm3u8',
+  'audio/x-mpegurl': 'm3u8',
   'video/3gpp': '3gp',
   'video/mpeg': 'mpg',
   'video/quicktime': 'mov',
@@ -91,7 +94,7 @@ class SGet extends MyGet {
     const e = /(.+)\.([^.]{1,6})*$/.exec(name);
 
     name = e ? e[1] : name;
-    meta.mime = resp.headers.get('Content-Type') || '';
+    meta.mime = resp.headers.get('Content-Type') || meta.mime || '';
     meta.ext = e ? e[2] : (MIME_TYPES[meta.mime] || meta.mime.split('/')[1] || '').split(';')[0];
     meta.ext = meta.ext.slice(0, 15); // cannot be longer than 16 characters.
     //

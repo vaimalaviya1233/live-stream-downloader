@@ -1,306 +1,41 @@
-/* global MyGet, m3u8Parser, network */
+/**
+    MyGet - A multi-thread downloading library
+    Copyright (C) 2014-2022 [Chandler Stimson]
 
-/*
-  http://127.0.0.1:8000/example/sample/unencrypted.m3u8
-  aHR0cHM6Ly9iaXRkYXNoLWEuYWthbWFpaGQubmV0L2NvbnRlbnQvc2ludGVsL2hscy9wbGF5bGlzdC5tM3U4
-  aHR0cHM6Ly9iaXRkYXNoLWEuYWthbWFpaGQubmV0L2NvbnRlbnQvTUkyMDExMDkyMTAwODRfMS9tM3U4cy9mMDhlODBkYS1iZjFkLTRlM2QtODg5OS1mMGY2MTU1ZjZlZmEubTN1OA==
-  aHR0cDovL2RlbW8udGhlb3BsYXllci5jb20vZHJtLWFlcy1wcm90ZWN0aW9uLTEyOC1lbmNyeXB0aW9u
-  aHR0cHM6Ly9hbmltZS5hbmlkdWIubGlmZS9hbmltZS9mdWxsLzExMjcwLWRldnVzaGtpLXBvbmktZW5rb21hLXVtYXlvbi0wMS1pei0xMy5odG1s
-  aHR0cHM6Ly9zb3VuZGNsb3VkLmNvbS9uYmEteW91bmdib3kveW91bmdib3ktbmV2ZXItYnJva2UtYWdhaW4=
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the Mozilla Public License as published by
+    the Mozilla Foundation, either version 2 of the License, or
+    (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    Mozilla Public License for more details.
+    You should have received a copy of the Mozilla Public License
+    along with this program.  If not, see {https://www.mozilla.org/en-US/MPL/}.
 
-  Encrypted with discontinuity and audio and subtitle media groups
-    aHR0cHM6Ly93d3cuc2JzLmNvbS5hdS9vbmRlbWFuZC93YXRjaC85MTUxNzAzNzE4MzQ=
-
-  https://raw.githubusercontent.com/ooyala/m3u8/master/sample-playlists/media-playlist-with-discontinuity.m3u8
-
-  Encrypted
-  https://www.radiantmediaplayer.com/media/rmp-segment/bbb-abr-aes/playlist.m3u8
+    GitHub: https://github.com/chandler-stimson/live-stream-downloader/
+    Homepage: https://webextension.org/listing/hls-downloader.html
 */
+
+/* global parse, MyGet, network, extract, helper, addEntries */
 
 const args = new URLSearchParams(location.search);
 
 const tabId = Number(args.get('tabId')); // original tab
-const progress = document.getElementById('progress');
+const progress = document.getElementById('current-progress');
 
 const events = {
   before: new Set(), // before download begins
   after: new Set() // after download ends
 };
 
-const storage = {
-  get(prefs) {
-    return new Promise(resolve => chrome.storage.local.get(prefs, resolve));
-  },
-  set(prefs) {
-    return new Promise(resolve => chrome.storage.local.set(prefs, resolve));
-  }
-};
-
-document.title += ' from "' + (args.get('title') || 'New Tab') + '"';
-
-self.notify = (msg, timeout = 750) => {
-  if (self.notify.id === undefined) {
-    self.notify.content = document.title;
-  }
-  document.title = msg;
-
-  if (timeout) {
-    clearTimeout(self.notify.id);
-    self.notify.id = setTimeout(() => {
-      document.title = self.notify.content;
-      self.notify.id = undefined;
-    }, timeout);
-  }
-};
-
-self.prompt = (msg, buttons = {
-  ok: 'Retry',
-  no: 'Cancel',
-  value: ''
-}, confirm = false) => {
-  return new Promise((resolve, reject) => {
-    const root = document.getElementById('prompt');
-    self.prompt.cache.push({resolve, reject});
-
-
-    if (root.open === false) {
-      root.querySelector('p').textContent = msg;
-      root.dataset.mode = confirm ? 'confirm' : 'prompt';
-
-      root.querySelector('[name=value]').required = confirm;
-      root.querySelector('[name=value]').value = buttons.value;
-      root.querySelector('[name=value]').select();
-      root.querySelector('[name=value]').type = isNaN(buttons.value) ? 'text' : 'number';
-      root.querySelector('[value=default]').textContent = buttons.ok;
-      root.querySelector('[value=cancel]').textContent = buttons.no;
-      [...root.querySelectorAll('[value=extra]')].forEach((e, n) => {
-        e.textContent = buttons.extra ? buttons.extra[n] : '';
-      });
-
-      let value = Error('USER_ABORT');
-
-      root.onsubmit = e => {
-        e.preventDefault();
-        if (e.submitter.value === 'default') {
-          value = root.querySelector('[name=value]').value;
-          root.close();
-        }
-        else if (e.submitter.value === 'extra') {
-          value = e.submitter.dataset.id;
-          root.close();
-        }
-        else {
-          root.close();
-        }
-      };
-      root.onclose = () => {
-        if (value instanceof Error) {
-          for (const {reject} of self.prompt.cache) {
-            reject(value);
-          }
-        }
-        else {
-          for (const {resolve} of self.prompt.cache) {
-            resolve(value);
-          }
-        }
-        self.prompt.cache.length = 0;
-      };
-
-      root.showModal();
-      root.querySelector(confirm ? '[name=value]' : '[value=default]').focus();
-    }
-  });
-};
-self.prompt.cache = [];
-
-const response = o => {
-  const headers = new Headers();
-  for (const {name, value} of (o.responseHeaders || [])) {
-    headers.set(name, value);
-  }
-  return {
-    url: o.url,
-    headers
-  };
-};
-const build = async os => {
-  const prefs = await storage.get({
-    'filename': '[meta.name]' // [meta.name], [title], [hostname], [q:query|method|default-value]
-  });
-  let hostname = 'NA';
-  try {
-    const o = new URL(args.get('href'));
-    hostname = o.hostname;
-  }
-  catch (e) {}
-
-  // extract "q:" matches from the page
-  if (prefs.filename.includes('[q:')) {
-    const regex = /\[q:((?:\[[^\]]*?\]|.)*?)\]/g;
-
-    const matches = [];
-    let match;
-
-    while ((match = regex.exec(prefs.filename)) !== null) {
-      matches.push(match[1]);
-    }
-
-    if (matches.length) {
-      await chrome.scripting.executeScript({
-        target: {
-          tabId
-        },
-        func: matches => {
-          const results = [];
-          for (const match of matches) {
-            const [query, method, defaultValue] = match.split('|');
-            let value = '';
-            try {
-              const e = document.querySelector(query);
-              if (method) {
-                value = e[method] || e.getAttribute(method);
-              }
-              else {
-                value = e.textContent;
-              }
-            }
-            catch (e) {}
-            value = value || (defaultValue || '');
-
-            results.push({
-              match,
-              value
-            });
-          }
-          return results;
-        },
-        args: [matches]
-      }).then(r => {
-        for (const {match, value} of r[0].result) {
-          prefs.filename = prefs.filename.replace('[q:' + match + ']', value);
-        }
-      }).catch(e => console.info('Cannot run query search on page', e));
-    }
-  }
-
-  const t = document.getElementById('entry');
-  let naming = 0;
-  for (const o of os) {
-    const clone = document.importNode(t.content, true);
-    const div = clone.querySelector('label');
-    const en = clone.querySelector('[data-id=name]');
-    const exn = clone.querySelector('[data-id=extracted-name]');
-    const ex = clone.querySelector('[data-id=ext]');
-    const meta = {};
-
-    const name = () => {
-      meta.gname = en.textContent = en.title = prefs.filename
-        .replace('[meta.name]', meta.name)
-        .replace('[title]', args.get('title'))
-        .replace('[hostname]', hostname);
-
-      if (prefs.filename.includes('[meta.name]') === false) {
-        exn.textContent = exn.title = '(' + meta.name + ')';
-      }
-
-      ex.textContent = meta.ext || 'N/A';
-    };
-
-    // offline naming
-    const r = response(o instanceof File ? {
-      url: 'local/' + o.name
-    } : o);
-    MyGet.guess(r, meta);
-
-    name();
-    // optional online naming (for the first 20 items)
-    if (naming < 20 && r.url.startsWith('http') && document.getElementById('online-resolve-name').checked) {
-      naming += 1;
-
-      const controller = new AbortController();
-      const signal = controller.signal;
-
-      fetch(r.url, {
-        method: 'GET',
-        signal
-      }).then(r => {
-        if (r.ok) {
-          MyGet.guess(r, meta);
-          name();
-        }
-        controller.abort();
-      }).catch(() => {});
-    }
-
-    if (r.headers.has('Content-Length')) {
-      clone.querySelector('[data-id=size]').textContent = MyGet.size(r.headers.get('Content-Length') || '0');
-    }
-    else {
-      clone.querySelector('[data-id=size]').textContent = '-';
-    }
-    clone.querySelector('[data-id=href]').textContent = clone.querySelector('[data-id=href]').title = (o.url || 'N/A');
-
-    clone.querySelector('input[data-id=copy]').onclick = e => navigator.clipboard.writeText(o.url).then(() => {
-      e.target.value = 'Done';
-      setTimeout(() => e.target.value = 'Copy', 750);
-    }).catch(e => alert(e.message));
-
-    div.o = o;
-    div.meta = meta;
-
-    document.getElementById('hrefs').appendChild(div);
-    const c = document.getElementById('hrefs-container');
-    c.scrollTop = c.scrollHeight;
-  }
-
-  document.body.dataset.mode = document.querySelector('form .entry') ? 'ready' : 'empty';
-};
-
+document.title = 'Inspecting tab...';
 Promise.all([
-  chrome.scripting.executeScript({
-    target: {
-      tabId
-    },
-    func: url => {
-      self.storage = self.storage || new Map();
-
-      if (url && self.storage.has(url) === false) {
-        self.storage.set(url, {
-          url
-        });
-      }
-
-      return [...self.storage.values()];
-    },
-    args: [args.get('append')]
-  }).then(a => a[0].result).catch(() => []),
-  // get extra available resources
-  network.types({core: true, extra: false, sub: true}).then(types => chrome.scripting.executeScript({
-    target: {
-      tabId
-    },
-    func: types => performance.getEntriesByType('resource')
-      .filter(o => ['video', 'xmlhttprequest'].includes(o.initiatorType))
-      .filter(o => {
-        for (const type of types) {
-          if (o.name.includes('.' + type)) {
-            return true;
-          }
-        }
-      })
-      .map(o => ({
-        initiator: location.href,
-        url: o.name,
-        timeStamp: performance.now() + o.startTime,
-        source: 'performance'
-      })),
-    world: 'MAIN',
-    args: [types]
-  }).then(a => a[0].result).catch(() => []))
-]).then(async ([os1, os2]) => {
-  const os = new Map();
-
+  extract.storage(tabId),
+  extract.performance(tabId),
+  extract.player(tabId)
+]).then(async ([storageEntries, performanceEntries, playerEntries]) => {
+  const entries = new Map();
   if (args.get('extra') === 'true') {
     try {
       const links = await new Promise(resolve => chrome.runtime.sendMessage({
@@ -309,7 +44,7 @@ Promise.all([
       }, resolve));
 
       for (const url of links) {
-        os.set(url, {url});
+        entries.set(url, {url});
       }
     }
     catch (e) {
@@ -317,40 +52,48 @@ Promise.all([
     }
   }
 
-  for (const o of (os2 || [])) {
-    os.set(o.url, o);
+  try {
+    for (const entry of (playerEntries || [])) {
+      entries.set(entry.url, entry);
+    }
   }
-  for (const o of (os1 || [])) { // overwrite os2 which does not include details
-    os.set(o.url, o);
+  catch (e) {}
+  try {
+    for (const entry of (performanceEntries || [])) {
+      entries.set(entry.url, entry);
+    }
   }
+  catch (e) {}
+  // overwrite performanceEntries which does not include details
+  try {
+    for (const entry of (storageEntries || [])) {
+      entries.set(entry.url, entry);
+    }
+  }
+  catch (e) {}
 
+  // append
+  const append = args.get('append');
+  if (append && entries.has(append) === false) {
+    entries.set(append, {
+      url: append
+    });
+  }
 
   let forbiddens = 0;
   // remove forbidden links
   const blocked = await network.blocked();
-  for (const url of os.keys()) {
-    if (blocked({url})) {
-      os.delete(url);
+  for (const [stream, entry] of entries.entries()) {
+    entry.blocked = blocked({
+      host: args.get('href'),
+      stream
+    });
+    if (entry.blocked.value) {
       forbiddens += 1;
     }
   }
 
-  const items = [...os.values()];
-
-  // m3u8 on top
-  // items.sort((a, b) => {
-  //   const ah = a.url.includes('m3u8');
-  //   const bh = b.url.includes('m3u8');
-  //   if (ah && bh === false) {
-  //     return -1;
-  //   }
-  //   if (bh && ah === false) {
-  //     return 1;
-  //   }
-  //   return a.timeStamp - b.timeStamp;
-  // });
-
-  build(items);
+  await addEntries(entries);
 
   // forbidden
   document.getElementById('forbiddens').textContent = forbiddens;
@@ -375,37 +118,37 @@ const download = async (segments, file, codec = '') => {
     timelines[segment.timeline] = timelines[segment.timeline] || [];
     timelines[segment.timeline].push(segment);
   }
-  const kt = Object.entries(timelines);
+  const timingObjects = Object.entries(timelines);
 
-  if (kt.length > 1) {
+  if (timingObjects.length > 1) {
     const msg = `This M3U8 media file contains different timelines, each usually representing a separate piece of ` +
       `media (short timelines are often ads). Choose the timeline you want to download. You can repeat the process ` +
       `to download more timelines later. It's best to download each timeline separately, but you can also download ` +
       `all segments into one file (though it might not play properly).`;
 
     // select the longest timeline
-    let value = 0;
-    let m = 0;
-    for (const [id, a] of kt) {
-      if (m < a.length) {
-        value = id;
-        m = a.length;
+    let suggested = 0;
+    let largestObject = 0;
+    for (const [id, a] of timingObjects) {
+      if (largestObject < a.length) {
+        suggested = id;
+        largestObject = a.length;
       }
     }
-    const n = await self.prompt(msg + `
+    const selected = await self.prompt(msg + `
 
-${kt.map(([id, a]) => {
+${timingObjects.map(([id, a]) => {
     return id + ' (includes ' + a.length + ' segments)';
   }).join('\n')}`, {
       ok: 'Select a Timeline',
       extra: ['Download Each Separately', 'Ignore Timelines'],
       no: 'Cancel',
-      value
+      value: suggested
     }, true);
 
-    if (n === 'extra-0') {
+    if (selected === 'extra-0') {
       const jobs = [];
-      for (const [timeline, segments] of kt) {
+      for (const [timeline, segments] of timingObjects) {
         const name = file.name.replace(/\.(?=[^.]+$)/, '-' + timeline + '.');
         jobs.push({name, segments});
       }
@@ -415,8 +158,8 @@ ${kt.map(([id, a]) => {
       catch (e) {}
       return self.batch(jobs, codec);
     }
-    else if (n !== 'extra-1') {
-      segments = timelines[n];
+    else if (selected !== 'extra-1') {
+      segments = timelines[selected];
     }
   }
   if (Array.isArray(segments) === false) {
@@ -425,24 +168,27 @@ ${kt.map(([id, a]) => {
 
   // remove duplicated segments (e.g. video/fMP4)
   const links = [];
-  segments = segments.filter(s => {
-    if (links.indexOf(s.uri) === -1) {
-      links.push(s.uri);
+  segments = segments.filter(segment => {
+    if (links.indexOf(segment.uri) === -1) {
+      links.push(segment.uri);
       return true;
     }
     return false;
   });
 
   // segment with initialization map
-  segments = segments.map(s => {
-    if (s.map && s.map.uri && s.map.uri !== s.uri) {
-      return [{
-        ...s,
-        uri: s.map.uri,
-        cache: true // cache this fetch
-      }, s];
+  segments = segments.map(segment => {
+    if (segment.map) {
+      const uri = segment.map.resolvedUri || segment.map.uri;
+      if (uri && uri !== segment.uri) {
+        return [{
+          ...segment,
+          ...segment.map,
+          cache: true // cache this fetch
+        }, segment];
+      }
     }
-    return s;
+    return segment;
   }).flat();
 
   const stat = {
@@ -451,13 +197,13 @@ ${kt.map(([id, a]) => {
     total: segments.length
   };
 
-  const n = new MyGet();
-  n.meta['base-codec'] = codec;
+  const myGet = new MyGet();
+  myGet.meta['base-codec'] = codec;
 
   // stats
-  n.monitor = new Proxy(n.monitor, {
+  myGet.monitor = new Proxy(myGet.monitor, {
     apply(target, self, args) {
-      const [segment, position, chunk, offset] = args;
+      const [, position, chunk] = args;
       stat.current = Math.max(stat.current, position);
       stat.fetched += chunk.byteLength;
 
@@ -465,13 +211,13 @@ ${kt.map(([id, a]) => {
     }
   });
 
-  Object.assign(n.options, await storage.get({
+  Object.assign(myGet.options, await chrome.storage.local.get({
     'threads': MyGet.OPTIONS.threads,
     'thread-timeout': MyGet.OPTIONS['thread-timeout']
   }));
 
   // instead of breaking, let the user retry
-  n.options['error-handler'] = (e, source, href) => {
+  myGet.options['error-handler'] = (e, source, href) => {
     return self.prompt(`Connection to the server is broken (${source} -> ${e.message})!
 
 Use the box below to update the URL`, {
@@ -491,26 +237,28 @@ Use the box below to update the URL`, {
     });
   };
 
-  console.info('MyGet Instance', n);
+  console.info('MyGet Instance', myGet);
 
   const timer = setInterval(() => {
-    // downloading a single file
+    // downloading a single segment file
     if (stat.total === 1) {
-      if (n.sizes.has(0)) {
-        const percent = stat.fetched / n.sizes.get(0) * 100;
-        document.title = percent.toFixed(1) + `% fetched [${MyGet.size(stat.fetched)}/${MyGet.size(n.sizes.get(0))}]` +
-          ` [Threads: ${n.actives}]`;
+      if (myGet.sizes.has(0)) {
+        const percent = stat.fetched / myGet.sizes.get(0) * 100;
+        document.title =
+          percent.toFixed(1) + `% fetched [${MyGet.size(stat.fetched)}/${MyGet.size(myGet.sizes.get(0))}]` +
+          ` [Threads: ${myGet.actives}]`;
 
         progress.value = stat.fetched;
-        progress.max = n.sizes.get(0);
+        progress.max = myGet.sizes.get(0);
       }
       else {
         document.title = MyGet.size(stat.fetched) + ' fetched...';
       }
     }
+    // downloading multiple segment file
     else {
       document.title = (stat.current / stat.total * 100).toFixed(1) +
-        `% fetched [${stat.current}/${stat.total}] (${MyGet.size(stat.fetched)})` + ` [Threads: ${n.actives}]`;
+        `% fetched [${stat.current}/${stat.total}] (${MyGet.size(stat.fetched)})` + ` [Threads: ${myGet.actives}]`;
 
       progress.value = stat.current;
       progress.max = stat.total;
@@ -523,10 +271,10 @@ Use the box below to update the URL`, {
 
   try {
     // attach disk writer
-    await n.attach(file);
+    await myGet.attach(file);
 
     // download
-    await n.fetch(segments);
+    await myGet.fetch(segments);
     clearInterval(timer);
 
     document.title = 'Done. Media is ready!';
@@ -535,8 +283,8 @@ Use the box below to update the URL`, {
     }
 
     // try to rename
-    if (n.meta.name && n.meta.ext && file.move) {
-      const name = n.meta.name + '.' + n.meta.ext;
+    if (myGet.meta.name && myGet.meta.ext && file.move) {
+      const name = myGet.meta.name + '.' + myGet.meta.ext;
       if (name !== file.name) {
         const input = document.querySelector('[data-active=true] input[data-id=rename]');
         if (input) {
@@ -545,7 +293,7 @@ Use the box below to update the URL`, {
             if (confirm(`Rename media from "${file.name}" to "${name}"?
 
 -> This will overwrite an existing file with the same name.`)) {
-              file.move(name);
+              file.move(name).catch(e => self.notify(e.message));
               e.target.disabled = true;
             }
           };
@@ -561,215 +309,6 @@ Use the box below to update the URL`, {
   clearInterval(timer);
 };
 
-const parser = async (manifest, file, href, codec) => {
-  // data uri
-  if (manifest.startsWith('data:')) {
-    manifest = await fetch(manifest).then(r => r.text());
-  }
-
-  // manifest is URL
-  if (manifest.split('\n').length === 1) {
-    if (!href) {
-      href = manifest;
-    }
-
-    let o;
-    if (manifest.startsWith('http') || manifest.startsWith('blob:')) {
-      o = new URL(manifest);
-    }
-    else if (href && (href.startsWith('http') || href.startsWith('blob:'))) {
-      o = new URL(manifest, href);
-    }
-    else {
-      href = await prompt(`What is the base URL for "${manifest}"`, {
-        ok: 'Set Base',
-        no: 'Abort'
-      }, true);
-      o = new URL(manifest, href);
-    }
-
-    manifest = await fetch(o.href).then(r => {
-      if (r.ok) {
-        href = o.href;
-        return r.text();
-      }
-      throw Error('FAILED_TO_FETCH_' + r.status);
-    });
-  }
-
-  document.title = 'Parsing M3U8 manifest ...';
-  document.body.dataset.mode = 'parse';
-
-  const p = new m3u8Parser.Parser();
-
-  p.push(manifest);
-  p.end();
-
-  console.info('Manifest', p);
-
-  const playlists = p.manifest.playlists || [];
-  // add media groups
-  if (p.manifest.mediaGroups) {
-    for (const [type, group] of Object.entries(p.manifest.mediaGroups)) {
-      try {
-        Object.values(group).forEach(g => {
-          for (const [lang, o] of Object.entries(g)) {
-            playlists.push({
-              ...o,
-              group: {
-                lang,
-                type
-              }
-            });
-          }
-        });
-      }
-      catch (e) {
-        console.error('cannot append a media group', e);
-      }
-    }
-  }
-
-  if (playlists.length) {
-    const {quality} = await storage.get({
-      quality: 'selector'
-    });
-
-    let n = 0; // highest
-    // sort based on highest quality
-    playlists.sort((a, b) => {
-      // dealing with groups
-      if (a.group && !b.group) {
-        return 1;
-      }
-      if (b.group && !a.group) {
-        return -1;
-      }
-      if (a.group && b.group) {
-        return b.group.type.localeCompare(a.group.type);
-      }
-      //
-      try {
-        return b.attributes.RESOLUTION.width - a.attributes.RESOLUTION.width;
-      }
-      catch (e) {
-        return 0;
-      }
-    });
-    if (quality === 'selector') {
-      const msgs = [];
-
-      const trim = (str = '', trimSize = 40) => {
-        if (str.length <= trimSize) {
-          return str;
-        }
-
-        const start = str.substring(0, trimSize / 2 - 2); // -2 to account for the ellipsis
-        const end = str.substring(str.length - trimSize / 2 + 1); // +1 to keep the ellipsis at the end
-
-        return start + '...' + end;
-      };
-
-      for (const playlist of playlists) {
-        if (playlist.attributes && playlist.attributes.RESOLUTION) {
-          msgs.push(
-            'Video [' +
-            playlist.attributes.RESOLUTION.width + ' × ' +
-            playlist.attributes.RESOLUTION.height + '] -> ' +
-            trim(playlist.uri)
-          );
-        }
-        else if (playlist.group) {
-          msgs.push(
-            playlist.group.type.toLowerCase() + ' [' +
-            playlist.group.lang.toLowerCase() + '] -> ' +
-            trim(playlist.uri, 30)
-          );
-        }
-        else {
-          msgs.push(trim(playlist.uri));
-        }
-      }
-      n = (playlists.length > 1 ? await prompt('Select one stream:\n\n' + msgs.map((m, n) => n + '. ' + m).join('\n'), {
-        ok: 'Select Quality',
-        no: 'Abort',
-        value: 0
-      }, true) : 0);
-    }
-    else if (quality === 'lowest') {
-      // remove media groups first
-      // n = playlists.length - 1;
-      n = playlists.filter(o => !o.group).length - 1;
-    }
-
-    const v = playlists[Number(n)];
-    if (v) {
-      try {
-        const codec = v.attributes?.CODECS;
-        const o = new URL(v.uri, href || undefined);
-        return parser(o.href, file, undefined, codec);
-      }
-      catch (e) {
-        return parser(v.uri, file, href);
-      }
-    }
-    throw Error('UNKNOWN_QUALITY');
-  }
-
-  const segments = p.manifest.segments;
-
-  if (segments.length) {
-    // do we have a valid segment
-    if (!href && segments[0].uri.startsWith('http') === false) {
-      href = await prompt(`What is the base URL for "${segments[0].uri}"`, {
-        ok: 'Set Base',
-        no: 'Abort'
-      }, true);
-    }
-
-    document.title = 'Downloading ' + href;
-    return download(segments.map(o => {
-      o.base = href;
-      return o;
-    }), file, codec);
-  }
-  else {
-    throw Error('No_SEGMENT_DETECTED');
-  }
-};
-
-const options = div => {
-  const options = {
-    types: [{
-      description: 'Video or Audio Files'
-    }]
-  };
-
-  // this way, the file can get played while download is in progress
-  if (div.meta.ext === 'm3u8' || div.meta.ext === '') {
-    options.types[0].accept = {
-      'video/mkv': ['.mkv']
-    };
-    options.suggestedName =
-      (div.meta.gname || div.meta.name || 'Untitled') +
-      (div.meta.index ? (' - ' + div.meta.index) : '') +
-      '.mkv';
-  }
-  else if (div.meta.ext) {
-    if (div.meta.mime) {
-      options.types[0].accept = {
-        [div.meta.mime]: ['.' + div.meta.ext]
-      };
-    }
-    options.suggestedName =
-      (div.meta.gname || div.meta.name || 'Untitled') +
-      (div.meta.index ? (' - ' + div.meta.index) : '') +
-      '.' + div.meta.ext;
-  }
-
-  return options;
-};
-
 document.getElementById('hrefs').onsubmit = async e => {
   e.preventDefault();
   const div = e.submitter.closest('label');
@@ -780,52 +319,79 @@ document.getElementById('hrefs').onsubmit = async e => {
   try {
     div.dataset.active = true;
 
-    const opts = options(div);
-    const file = self.aFile || await window.showSaveFilePicker(opts).catch(e => {
-      console.error(e);
-      // the explorer rejects the suggested name
-      // opts.types[0].accept = {'dd/vv': ['.longextensionfile']};
-      if (e instanceof TypeError) {
-        return window.showSaveFilePicker({
-          types: [{
-            accept: {
-              'video/mkv': ['.mkv']
-            },
-            description: 'Video or Audio Files'
-          }]
-        });
+    const opts = helper.options(div);
+
+    // the explorer rejects the suggested name
+    // opts.types[0].accept = {'dd/vv': ['.longextensionfile']};
+    let file = self.aFile;
+    // ask user for picking
+    if (!file) {
+      try {
+        // use the original name
+        file = await window.showSaveFilePicker(opts);
       }
-      throw e;
-    });
-    button.value = 'Processing...';
-
-
-    // run pre
-    for (const c of events.before) {
-      await c(div.o);
+      catch (e) {
+        console.error(e);
+        if (e instanceof TypeError) {
+          try {
+            // try to remove illegal or problematic characters for Windows, macOS, Linux
+            // https://github.com/chandler-stimson/live-stream-downloader/issues/46
+            opts.suggestedName = opts.suggestedName.replace(
+              /[\\/:*?"<>|\0]|^[\s.]+|[\s.]+$|[~`!@#$%^&+={}[\];,]/g,
+              '_'
+            );
+            file = await window.showSaveFilePicker(opts);
+          }
+          catch (e) {
+            console.error(e);
+            if (e instanceof TypeError) {
+              delete opts.suggestedName;
+              file = await window.showSaveFilePicker(opts);
+            }
+            else {
+              throw e;
+            }
+          }
+        }
+        else {
+          throw e;
+        }
+      }
     }
 
-    // URL
-    if (div.o instanceof File) {
+    button.value = 'Processing...';
+
+    // run pre
+    for (const callback of events.before) {
+      await callback(div.entry);
+    }
+
+    if (div.entry instanceof File) {
       await new Promise((resolve, reject) => {
+        document.title = 'Parsing M3U8 manifest ...';
+        document.body.dataset.mode = 'parse';
         const reader = new FileReader();
-        reader.onload = () => parser(reader.result, file, undefined).then(resolve, reject);
-        reader.readAsText(div.o, 'utf-8');
+        reader.onload = () => parse(reader.result, file, undefined, undefined, (segments, file, codec) => {
+          document.title = 'Downloading ' + segments[0].base;
+          return download(segments, file, codec);
+        }).then(resolve, reject);
+        reader.readAsText(div.entry, 'utf-8');
       });
     }
     else {
-      if (
-        div.meta.ext !== 'm3u8' &&
-        div.o.url.indexOf('.m3u8') === -1 &&
-        div.o.url.indexOf('format=m3u8') === -1
-      ) {
-        document.title = 'Downloading ' + div.o.url;
+      if (helper.downloadable(div)) {
+        document.title = 'Downloading ' + div.entry.url;
         await download([{
-          uri: div.o.url
+          uri: div.entry.url
         }], file);
       }
       else {
-        await parser(div.o.url, file);
+        document.title = 'Parsing M3U8 manifest ...';
+        document.body.dataset.mode = 'parse';
+        await parse(div.entry.url, file, undefined, undefined, (segments, file, codec) => {
+          document.title = 'Downloading ' + segments[0].base;
+          return download(segments, file, codec);
+        });
       }
     }
     div.classList.remove('error');
@@ -838,10 +404,12 @@ document.getElementById('hrefs').onsubmit = async e => {
   }
 
   // run post
-  for (const c of events.after) {
+  for (const callback of events.after) {
     /* success, done */
-
-    c(document.body.dataset.mode === 'done', 'aFile' in self ? self.aFile.stat.index === self.aFile.stat.total : true);
+    callback(
+      document.body.dataset.mode === 'done',
+      'aFile' in self ? self.aFile.stat.index === self.aFile.stat.total : true
+    );
   }
 
   button.value = 'Download';

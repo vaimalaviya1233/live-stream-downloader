@@ -1,4 +1,23 @@
-/* global error, options, events */
+/**
+    MyGet - A multi-thread downloading library
+    Copyright (C) 2014-2022 [Chandler Stimson]
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the Mozilla Public License as published by
+    the Mozilla Foundation, either version 2 of the License, or
+    (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    Mozilla Public License for more details.
+    You should have received a copy of the Mozilla Public License
+    along with this program.  If not, see {https://www.mozilla.org/en-US/MPL/}.
+
+    GitHub: https://github.com/chandler-stimson/live-stream-downloader/
+    Homepage: https://webextension.org/listing/hls-downloader.html
+*/
+
+/* global error, helper, events */
 
 {
   const hrefs = document.getElementById('hrefs');
@@ -25,14 +44,14 @@
         }
       }
       const validate = div => {
-        const name = options(div).suggestedName;
+        const name = helper.options(div).suggestedName;
 
         filenames[name] = name in filenames ? filenames[name] : -1;
         filenames[name] += 1;
 
         div.meta.index = filenames[name];
 
-        const n = options(div).suggestedName;
+        const n = helper.options(div).suggestedName;
         if (n in filenames) {
           if (filenames[name]) {
             validate(div);
@@ -51,21 +70,24 @@
         if (divs.length) {
           const div = divs.shift();
 
-          self.aFile = await dir.getFileHandle(options(div).suggestedName, {
+          self.aFile = await dir.getFileHandle(helper.options(div).suggestedName, {
             create: true
           });
           self.aFile.stat = {
             index: next.total - divs.length,
             total: next.total
           };
+          document.getElementById('global-progress').value = self.aFile.stat.index;
 
           div.querySelector('[type=submit]').click();
         }
         else {
           delete self.aFile;
+          document.getElementById('global-progress').value = 0;
         }
       };
-      next.total = divs.length;
+      document.getElementById('global-progress').max = next.total = divs.length;
+
       events.after.add(next);
       next();
     }

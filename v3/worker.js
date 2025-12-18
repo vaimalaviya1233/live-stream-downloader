@@ -1,9 +1,44 @@
+/**
+    MyGet - A multi-thread downloading library
+    Copyright (C) 2014-2022 [Chandler Stimson]
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the Mozilla Public License as published by
+    the Mozilla Foundation, either version 2 of the License, or
+    (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    Mozilla Public License for more details.
+    You should have received a copy of the Mozilla Public License
+    along with this program.  If not, see {https://www.mozilla.org/en-US/MPL/}.
+
+    GitHub: https://github.com/chandler-stimson/live-stream-downloader/
+    Homepage: https://webextension.org/listing/hls-downloader.html
+*/
+
 /* global network */
 
-self.importScripts('network/core.js');
-self.importScripts('network/icon.js');
-self.importScripts('context.js');
-self.importScripts('/plugins/blob-detector/core.js');
+if (typeof importScripts !== 'undefined') {
+  self.importScripts('network/core.js');
+  self.importScripts('network/icon.js');
+  self.importScripts('context.js');
+  self.importScripts('/plugins/blob-detector/core.js');
+}
+
+self.notify = (tabId, text, title) => {
+  chrome.action.setBadgeBackgroundColor({
+    color: 'red'
+  });
+  chrome.action.setBadgeText({
+    tabId,
+    text
+  });
+  chrome.action.setTitle({
+    tabId,
+    title
+  });
+};
 
 /* extra objects */
 const extra = {};
@@ -83,9 +118,13 @@ const observe = d => {
   }
 
   // unsupported content types
-  if (d.url.includes('.m3u8') === false && d.responseHeaders.some(({name, value}) => {
-    return name === 'content-type' && value && value.startsWith('text/html');
-  })) {
+  if (
+    d.url.includes('.m3u8') === false &&
+    d.url.includes('.mpd') === false &&
+    d.type !== 'media' &&
+    d.responseHeaders.some(({name, value}) => {
+      return (name === 'content-type' || name === 'Content-Type') && value && value.startsWith('text/html');
+    })) {
     return;
   }
 
@@ -98,10 +137,6 @@ const observe = d => {
       self.storage.set(v.url, v);
       if (self.storage.size > size) {
         for (const [href] of self.storage) {
-          // do not delete important links
-          if (href.includes('.m3u8')) {
-            continue;
-          }
           self.storage.delete(href);
           if (self.storage.size <= size) {
             break;
@@ -121,7 +156,7 @@ const observe = d => {
 };
 observe.mime = d => {
   for (const {name, value} of d.responseHeaders) {
-    if (name === 'content-type' && value && (
+    if ((name === 'content-type' || name === 'Content-Type') && value && (
       value.startsWith('video/') || value.startsWith('audio/')
     )) {
       return observe(d);
@@ -196,18 +231,22 @@ network.types({
   chrome.storage.onChanged.addListener(ps => ps['mime-watch'] && run());
 }
 
+const raip = () => {
+  if (chrome.power) {
+    chrome.runtime.sendMessage({
+      method: 'any-active'
+    }, r => {
+      chrome.runtime.lastError;
+      if (r !== true) {
+        chrome.power.releaseKeepAwake();
+      }
+    });
+  }
+};
+
 chrome.runtime.onMessage.addListener((request, sender, response) => {
   if (request.method === 'release-awake-if-possible') {
-    if (chrome.power) {
-      chrome.runtime.sendMessage({
-        method: 'any-active'
-      }, r => {
-        chrome.runtime.lastError;
-        if (r !== true) {
-          chrome.power.releaseKeepAwake();
-        }
-      });
-    }
+    raip();
   }
   else if (request.method === 'get-extra') {
     response(extra[request.tabId] || []);
@@ -222,14 +261,17 @@ chrome.runtime.onMessage.addListener((request, sender, response) => {
     });
   }
 });
+chrome.alarms.onAlarm.addListener(a => {
+  if (a.name === 'release-awake-if-possible') {
+    raip();
+  }
+});
 
 /* delete all leftover cache requests */
 {
   const once = async () => {
     for (const key of await caches.keys()) {
-      if (key !== network.NAME) {
-        caches.delete(key);
-      }
+      caches.delete(key);
     }
   };
   chrome.runtime.onStartup.addListener(once);
@@ -252,8 +294,7 @@ chrome.runtime.onMessage.addListener((request, sender, response) => {
 {
   const {management, runtime: {onInstalled, setUninstallURL, getManifest}, storage, tabs} = chrome;
   if (navigator.webdriver !== true) {
-    const page = getManifest().homepage_url;
-    const {name, version} = getManifest();
+    const {homepage_url: page, name, version} = getManifest();
     onInstalled.addListener(({reason, previousVersion}) => {
       management.getSelf(({installType}) => installType === 'normal' && storage.local.get({
         'faqs': true,
@@ -262,7 +303,7 @@ chrome.runtime.onMessage.addListener((request, sender, response) => {
         if (reason === 'install' || (prefs.faqs && reason === 'update')) {
           const doUpdate = (Date.now() - prefs['last-update']) / 1000 / 60 / 60 / 24 > 45;
           if (doUpdate && previousVersion !== version) {
-            tabs.query({active: true, currentWindow: true}, tbs => tabs.create({
+            tabs.query({active: true, lastFocusedWindow: true}, tbs => tabs.create({
               url: page + '?version=' + version + (previousVersion ? '&p=' + previousVersion : '') + '&type=' + reason,
               active: reason === 'install',
               ...(tbs && tbs.length && {index: tbs[0].index + 1})
